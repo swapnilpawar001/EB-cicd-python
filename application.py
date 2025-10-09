@@ -21,7 +21,7 @@ def get_instance_id():
 
 @app.route("/")
 def home():
-    return f"<h1>Hello Batch 22 this is the demonstration of updating python deployment using PAAS</h1><p>Instance: {get_instance_id()}</p>"
+    return f"<h1>Hello Batch this is the demonstration of updating python deployment using cicd</h1><p>Instance: {get_instance_id()}</p>"
 
 if __name__ == "__main__":
     application.run(host="0.0.0.0", port=8080)
