@@ -21,7 +21,7 @@ def get_instance_id():
 
 @app.route("/")
 def home():
-    return f"<h1>Hello Batch 22 this is the demonstration of pytthoin deployment using cicd changes swapnil</h1><p>Instance: {get_instance_id()}</p>"
+    return f"<h1>Hello Batch 24 this is the demonstration of python deployment using cicd changes</h1><p>Instance: {get_instance_id()}</p>"
 
 if __name__ == "__main__":
     application.run(host="0.0.0.0", port=8080)

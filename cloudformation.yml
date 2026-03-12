@@ -1,0 +1,358 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Flask application deployment on Elastic Beanstalk with CI/CD pipeline'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: 'flask-python-app'
+    Description: 'Name of the Elastic Beanstalk application'
+  
+  EnvironmentName:
+    Type: String
+    Default: 'flask-python-app-env'
+    Description: 'Name of the Elastic Beanstalk environment'
+  
+  SolutionStackName:
+    Type: String
+    Default: '64bit Amazon Linux 2023 v4.3.3 running Python 3.11'
+    Description: 'Elastic Beanstalk platform (check AWS docs for latest version)'
+  
+  InstanceType:
+    Type: String
+    Default: 't3.micro'
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: 'EC2 instance type for the Elastic Beanstalk environment'
+  
+  GitHubRepo:
+    Type: String
+    Default: 'swapnilpawar001/EB-cicd-python'
+    Description: 'GitHub repository in format: username/repository'
+  
+  GitHubBranch:
+    Type: String
+    Default: 'main'
+    Description: 'GitHub branch to deploy'
+  
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: 'GitHub personal access token for CodePipeline (leave empty if deploying manually)'
+    Default: ''
+
+Conditions:
+  CreateCICDPipeline: !Not [!Equals [!Ref GitHubToken, '']]
+
+Resources:
+  # S3 Bucket for application artifacts
+  ApplicationBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-artifacts-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+
+  # IAM Role for Elastic Beanstalk Service
+  ElasticBeanstalkServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-eb-service-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticbeanstalk.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+
+  # IAM Role for EC2 instances in Elastic Beanstalk
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
+
+  # Instance Profile for EC2 instances
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ApplicationName}-ec2-profile'
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # Elastic Beanstalk Application
+  ElasticBeanstalkApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Ref ApplicationName
+      Description: 'Flask Python Application'
+
+  # Application Version (initial deployment from S3)
+  ApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      Description: 'Initial version'
+      SourceBundle:
+        S3Bucket: !Ref ApplicationBucket
+        S3Key: 'flask-app.zip'
+
+  # Elastic Beanstalk Environment
+  ElasticBeanstalkEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      EnvironmentName: !Ref EnvironmentName
+      ApplicationName: !Ref ElasticBeanstalkApplication
+      SolutionStackName: !Ref SolutionStackName
+      VersionLabel: !Ref ApplicationVersion
+      OptionSettings:
+        # Instance settings
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref EC2InstanceProfile
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: InstanceType
+          Value: !Ref InstanceType
+        
+        # Auto Scaling settings
+        - Namespace: aws:autoscaling:asg
+          OptionName: MinSize
+          Value: '1'
+        - Namespace: aws:autoscaling:asg
+          OptionName: MaxSize
+          Value: '4'
+        
+        # Load Balancer settings
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: LoadBalancerType
+          Value: 'application'
+        - Namespace: aws:elbv2:listener:default
+          OptionName: ListenerEnabled
+          Value: 'true'
+        
+        # Environment settings
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: EnvironmentType
+          Value: 'LoadBalanced'
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: ServiceRole
+          Value: !Ref ElasticBeanstalkServiceRole
+        
+        # Health reporting
+        - Namespace: aws:elasticbeanstalk:healthreporting:system
+          OptionName: SystemType
+          Value: 'enhanced'
+        
+        # Managed updates
+        - Namespace: aws:elasticbeanstalk:managedactions
+          OptionName: ManagedActionsEnabled
+          Value: 'true'
+        - Namespace: aws:elasticbeanstalk:managedactions
+          OptionName: PreferredStartTime
+          Value: 'Sun:03:00'
+        - Namespace: aws:elasticbeanstalk:managedactions:platformupdate
+          OptionName: UpdateLevel
+          Value: 'minor'
+
+  # CI/CD Pipeline Resources (only created if GitHub token is provided)
+  
+  # CodeBuild Service Role
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Condition: CreateCICDPipeline
+    Properties:
+      RoleName: !Sub '${ApplicationName}-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                Resource:
+                  - !Sub '${ApplicationBucket.Arn}/*'
+
+  # CodeBuild Project
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Condition: CreateCICDPipeline
+    Properties:
+      Name: !Sub '${ApplicationName}-build'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value: !Ref ApplicationBucket
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+
+  # CodePipeline Service Role
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Condition: CreateCICDPipeline
+    Properties:
+      RoleName: !Sub '${ApplicationName}-codepipeline-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                Resource:
+                  - !Sub '${ApplicationBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketLocation'
+                  - 's3:ListBucket'
+                Resource:
+                  - !GetAtt ApplicationBucket.Arn
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource:
+                  - !GetAtt CodeBuildProject.Arn
+              - Effect: Allow
+                Action:
+                  - 'elasticbeanstalk:DescribeApplications'
+                  - 'elasticbeanstalk:DescribeEnvironments'
+                  - 'elasticbeanstalk:CreateApplicationVersion'
+                  - 'elasticbeanstalk:UpdateEnvironment'
+                Resource: '*'
+
+  # CodePipeline
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Condition: CreateCICDPipeline
+    Properties:
+      Name: !Sub '${ApplicationName}-pipeline'
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ApplicationBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Select [0, !Split ['/', !Ref GitHubRepo]]
+                Repo: !Select [1, !Split ['/', !Ref GitHubRepo]]
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: true
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ElasticBeanstalk
+                Version: '1'
+              Configuration:
+                ApplicationName: !Ref ElasticBeanstalkApplication
+                EnvironmentName: !Ref ElasticBeanstalkEnvironment
+              InputArtifacts:
+                - Name: BuildOutput
+
+Outputs:
+  ApplicationURL:
+    Description: 'URL of the Elastic Beanstalk application'
+    Value: !GetAtt ElasticBeanstalkEnvironment.EndpointURL
+  
+  S3BucketName:
+    Description: 'S3 bucket for application artifacts'
+    Value: !Ref ApplicationBucket
+  
+  ApplicationName:
+    Description: 'Elastic Beanstalk Application Name'
+    Value: !Ref ElasticBeanstalkApplication
+  
+  EnvironmentName:
+    Description: 'Elastic Beanstalk Environment Name'
+    Value: !Ref ElasticBeanstalkEnvironment
+  
+  CodePipelineName:
+    Description: 'CodePipeline Name (if CI/CD pipeline was created)'
+    Condition: CreateCICDPipeline
+    Value: !Ref CodePipeline
